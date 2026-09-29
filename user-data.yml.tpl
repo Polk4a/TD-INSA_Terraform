@@ -1,5 +1,5 @@
 #cloud-config
-hostname: sti-wp01
+hostname: ${hostname}
 manage_etc_hosts: true
 
 users:
@@ -27,9 +27,6 @@ packages:
   - php-xml
   - php-zip
 
-# Fichiers déposés en "staging" au premier démarrage (les paquets ne sont pas
-# encore installés : le groupe www-data n'existe pas). wp-bootstrap.sh les
-# installe ensuite au bon endroit, avec les bons droits.
 write_files:
   - path: /opt/wp-provision/wp-bootstrap.sh
     permissions: '0700'

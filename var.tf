@@ -43,6 +43,10 @@ variable "opnsense_api_secret" {
   sensitive   = true
 }
 
+# ---------------------------------------------------------------------------
+# sti-wp01 : WordPress (nginx + php-fpm) prêt à se brancher sur MariaDB / HAProxy
+# ---------------------------------------------------------------------------
+
 variable "wp_version" {
   description = "Version de WordPress téléchargée sur wordpress.org (à garder identique sur tous les nœuds WordPress)"
   type        = string
@@ -95,5 +99,41 @@ variable "wp_db_password" {
   validation {
     condition     = can(regex("^[A-Za-z0-9._-]{12,}$", var.wp_db_password))
     error_message = "wp_db_password : 12 caractères minimum, uniquement A-Z a-z 0-9 . _ - (ex : openssl rand -hex 24)."
+  }
+}
+
+variable "wp_nodes" {
+  description = "Nœuds WordPress (nginx + php-fpm), identiques, clonés depuis le même template : nom => vmid + IP fixe (réservation Kea sur OPNsense). Ajouter une entrée = ajouter un nœud."
+  type = map(object({
+    vmid       = number
+    ip         = string
+    dhcp_label = optional(string) # libellé de la réservation Kea (défaut : le nom du nœud)
+  }))
+
+  default = {
+    "sti-wp01" = {
+      vmid       = 120
+      ip         = "10.0.0.140"
+      dhcp_label = "tf_cloned_debian" # libellé historique, conservé pour ne rien modifier côté OPNsense
+    }
+    "sti-wp02" = {
+      vmid = 121
+      ip   = "10.0.0.160"
+    }
+  }
+
+  validation {
+    condition     = alltrue([for name in keys(var.wp_nodes) : can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", name))])
+    error_message = "Noms de nœuds : minuscules, chiffres et tirets uniquement (ex : sti-wp01)."
+  }
+
+  validation {
+    condition     = alltrue([for n in values(var.wp_nodes) : can(cidrhost("${n.ip}/32", 0))])
+    error_message = "Chaque ip doit être une adresse IPv4 valide."
+  }
+
+  validation {
+    condition     = length(distinct([for n in values(var.wp_nodes) : n.ip])) == length(var.wp_nodes) && length(distinct([for n in values(var.wp_nodes) : n.vmid])) == length(var.wp_nodes)
+    error_message = "Les IP et les vmid doivent être uniques."
   }
 }
