@@ -53,7 +53,7 @@ resource "proxmox_vm_qemu" "debian_clone" {
   os_type     = "cloud-init"
   ciuser    = var.ci_user
   sshkeys   = local.ssh_public_key
-  clone       = "debian"
+  clone       = "debian-cloudinit"
   full_clone  = true
   agent       = 1
   start_at_node_boot = true
@@ -72,9 +72,16 @@ resource "proxmox_vm_qemu" "debian_clone" {
   }
 
   disk {
-    slot      = "scsi0" #ide2
+    slot      = "scsi0" #scsi0/ide2
     size      = "40G"
-    type      = "disk" # cloudinit
+    type      = "disk" # disk/cloudinit
+    storage   = "local-lvm"
+  }
+
+  disk {
+    slot      = "ide2" #scsi0/ide2
+#    size      = "40G"
+    type      = "cloudinit" # disk/cloudinit
     storage   = "local-lvm"
   }
 
