@@ -1,5 +1,6 @@
 #cloud-config
-hostname: sti-web01
+hostname: sti-wp01
+manage_etc_hosts: true
 
 users:
   - default
@@ -16,7 +17,34 @@ packages:
   - vim
   - curl
   - nginx
+  - php-fpm
+  - php-cli
+  - php-mysql
+  - php-curl
+  - php-gd
+  - php-intl
+  - php-mbstring
+  - php-xml
+  - php-zip
+
+# Fichiers déposés en "staging" au premier démarrage (les paquets ne sont pas
+# encore installés : le groupe www-data n'existe pas). wp-bootstrap.sh les
+# installe ensuite au bon endroit, avec les bons droits.
+write_files:
+  - path: /opt/wp-provision/wp-bootstrap.sh
+    permissions: '0700'
+    content: |
+      ${bootstrap_sh}
+  - path: /opt/wp-provision/nginx-wordpress.conf
+    permissions: '0644'
+    content: |
+      ${nginx_conf}
+  - path: /opt/wp-provision/wp-config.php
+    permissions: '0600'
+    content: |
+      ${wp_config_php}
 
 runcmd:
-- systemctl enable qemu-guest-agent
-- systemctl start qemu-guest-agent
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+  - [ /opt/wp-provision/wp-bootstrap.sh, "${wp_version}" ]
