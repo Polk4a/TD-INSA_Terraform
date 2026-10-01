@@ -43,9 +43,59 @@ variable "opnsense_api_secret" {
   sensitive   = true
 }
 
-# ---------------------------------------------------------------------------
-# sti-wp01 : WordPress (nginx + php-fpm) prêt à se brancher sur MariaDB / HAProxy
-# ---------------------------------------------------------------------------
+variable "vms" {
+  description = "VMs de la plateforme, clonées depuis le même template : nom => rôle, vmid et IP fixe (réservation Kea sur OPNsense). Rôles : wordpress, database."
+  type = map(object({
+    role       = string
+    vmid       = number
+    ip         = string
+    dhcp_label = optional(string) # libellé de la réservation Kea (défaut : le nom de la VM)
+  }))
+
+  default = {
+    "sti-wp01" = {
+      role       = "wordpress"
+      vmid       = 120
+      ip         = "10.0.0.140"
+      dhcp_label = "tf_cloned_debian" # libellé historique, conservé pour ne rien modifier côté OPNsense
+    }
+    "sti-wp02" = {
+      role = "wordpress"
+      vmid = 121
+      ip   = "10.0.0.160"
+    }
+    "sti-db01" = {
+      role = "database"
+      vmid = 122
+      ip   = "10.0.0.170"
+    }
+  }
+
+  validation {
+    condition     = alltrue([for name in keys(var.vms) : can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", name))])
+    error_message = "Noms de VM : minuscules, chiffres et tirets uniquement (ex : sti-wp01)."
+  }
+
+  validation {
+    condition     = alltrue([for vm in values(var.vms) : contains(["wordpress", "database"], vm.role)])
+    error_message = "role doit valoir « wordpress » ou « database »."
+  }
+
+  validation {
+    condition     = alltrue([for vm in values(var.vms) : can(cidrhost("${vm.ip}/32", 0))])
+    error_message = "Chaque ip doit être une adresse IPv4 valide."
+  }
+
+  validation {
+    condition     = length(distinct([for vm in values(var.vms) : vm.ip])) == length(var.vms) && length(distinct([for vm in values(var.vms) : vm.vmid])) == length(var.vms)
+    error_message = "Les IP et les vmid doivent être uniques."
+  }
+
+  validation {
+    condition     = length([for vm in values(var.vms) : vm if vm.role == "database"]) <= 1
+    error_message = "Une seule VM au rôle « database » : la base MariaDB est partagée par tous les WordPress."
+  }
+}
 
 variable "wp_version" {
   description = "Version de WordPress téléchargée sur wordpress.org (à garder identique sur tous les nœuds WordPress)"
@@ -59,18 +109,18 @@ variable "wp_version" {
 }
 
 variable "wp_db_host" {
-  description = "Nom DNS ou IP de la VM MariaDB (sti-db01), avec :port optionnel. À remplacer par son IP dès qu'elle existe."
+  description = "Hôte MariaDB vu par WordPress (avec :port optionnel). Par défaut (null) : l'IP de la VM au rôle « database »."
   type        = string
-  default     = "sti-db01"
+  default     = null
 
   validation {
-    condition     = can(regex("^[A-Za-z0-9.-]+(:[0-9]{1,5})?$", var.wp_db_host))
+    condition     = var.wp_db_host == null || can(regex("^[A-Za-z0-9.-]+(:[0-9]{1,5})?$", var.wp_db_host))
     error_message = "wp_db_host : hôte ou IP (A-Z a-z 0-9 . -), avec :port optionnel."
   }
 }
 
 variable "wp_db_name" {
-  description = "Nom de la base WordPress sur MariaDB (créée plus tard par le rôle database)"
+  description = "Nom de la base WordPress sur MariaDB (créée sur la VM « database »)"
   type        = string
   default     = "wordpress"
 
@@ -92,7 +142,7 @@ variable "wp_db_user" {
 }
 
 variable "wp_db_password" {
-  description = "Mot de passe MariaDB de WordPress, à mettre dans terraform.tfvars (hors Git). Les clés/sels WordPress en sont dérivés : ils sont donc identiques sur tous les nœuds, indispensable derrière HAProxy en round-robin."
+  description = "Mot de passe MariaDB de WordPress, à mettre dans terraform.tfvars (hors Git). Utilisé des deux côtés (création du compte sur la base, wp-config.php sur les WordPress). Les clés/sels WordPress en sont dérivés : ils sont donc identiques sur tous les nœuds, indispensable derrière HAProxy en round-robin."
   type        = string
   sensitive   = true
 
@@ -102,38 +152,19 @@ variable "wp_db_password" {
   }
 }
 
-variable "wp_nodes" {
-  description = "Nœuds WordPress (nginx + php-fpm), identiques, clonés depuis le même template : nom => vmid + IP fixe (réservation Kea sur OPNsense). Ajouter une entrée = ajouter un nœud."
-  type = map(object({
-    vmid       = number
-    ip         = string
-    dhcp_label = optional(string) # libellé de la réservation Kea (défaut : le nom du nœud)
-  }))
-
-  default = {
-    "sti-wp01" = {
-      vmid       = 120
-      ip         = "10.0.0.140"
-      dhcp_label = "tf_cloned_debian" # libellé historique, conservé pour ne rien modifier côté OPNsense
-    }
-    "sti-wp02" = {
-      vmid = 121
-      ip   = "10.0.0.160"
-    }
-  }
+variable "db_allowed_cidrs" {
+  description = "Réseaux autorisés à se connecter à MariaDB (« VLAN web » du cours) : le compte WordPress n'existe que pour ces sources. Pour resserrer aux seuls WordPress : [\"10.0.0.140/32\", \"10.0.0.160/32\"]."
+  type        = list(string)
+  default     = ["10.0.0.0/24"]
 
   validation {
-    condition     = alltrue([for name in keys(var.wp_nodes) : can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", name))])
-    error_message = "Noms de nœuds : minuscules, chiffres et tirets uniquement (ex : sti-wp01)."
+    condition     = length(var.db_allowed_cidrs) > 0 && alltrue([for c in var.db_allowed_cidrs : can(cidrhost(c, 0))])
+    error_message = "db_allowed_cidrs : liste non vide de réseaux CIDR IPv4 (ex : 10.0.0.0/24)."
   }
+}
 
-  validation {
-    condition     = alltrue([for n in values(var.wp_nodes) : can(cidrhost("${n.ip}/32", 0))])
-    error_message = "Chaque ip doit être une adresse IPv4 valide."
-  }
-
-  validation {
-    condition     = length(distinct([for n in values(var.wp_nodes) : n.ip])) == length(var.wp_nodes) && length(distinct([for n in values(var.wp_nodes) : n.vmid])) == length(var.wp_nodes)
-    error_message = "Les IP et les vmid doivent être uniques."
-  }
+variable "db_firewall_interface" {
+  description = "Interface OPNsense (ex : \"lan\") sur laquelle créer la règle du cours « MariaDB (TCP 3306) depuis le VLAN web ». Défaut null = aucune règle. Sans effet tant que les VM partagent le même sous-réseau (ce trafic ne traverse pas OPNsense) : utile si la base est placée dans un autre VLAN."
+  type        = string
+  default     = null
 }
