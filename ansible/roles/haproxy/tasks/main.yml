@@ -1,0 +1,114 @@
+---
+# Rôle haproxy : répartiteur de charge devant les nœuds WordPress (sti-lb01).
+# Rejouable et sans risque : la configuration est validée AVANT de remplacer celle qui
+# tourne (une configuration invalide n'interrompt jamais le service), puis rechargée à
+# chaud seulement si elle a changé.
+
+# --- 1. Paquets et journaux ---------------------------------------------------------------
+# Les journaux d'HAProxy (requêtes, état des nœuds) passent par rsyslog, qui écoute dans le
+# chroot d'HAProxy : sans lui ils sont perdus sur Debian. Résultat : /var/log/haproxy.log
+- name: Installer HAProxy et rsyslog
+  ansible.builtin.apt:
+    name:
+      - haproxy
+      - rsyslog
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  notify: Redémarrer rsyslog
+
+- name: Activer et démarrer rsyslog
+  ansible.builtin.service:
+    name: rsyslog
+    state: started
+    enabled: true
+
+# rsyslog redémarre ici s'il vient d'être installé : il lit la configuration livrée avec HAProxy
+- name: Appliquer la configuration de rsyslog
+  ansible.builtin.meta: flush_handlers
+
+# --- 2. Configuration ------------------------------------------------------------------------
+# La configuration d'origine du paquet est gardée une fois (force: false = jamais écrasée)
+- name: Garder la configuration d'origine du paquet
+  ansible.builtin.copy:
+    src: /etc/haproxy/haproxy.cfg
+    dest: /etc/haproxy/haproxy.cfg.dist
+    remote_src: true
+    force: false
+    mode: preserve
+
+- name: Installer haproxy.cfg (validé par « haproxy -c » avant remplacement)
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: "0644"
+    validate: haproxy -c -f %s
+  notify: Recharger HAProxy
+
+- name: Activer et démarrer HAProxy
+  ansible.builtin.service:
+    name: haproxy
+    state: started
+    enabled: true
+
+- name: Appliquer la configuration
+  ansible.builtin.meta: flush_handlers
+
+# --- 3. Contrôle : HAProxy écoute-t-il sur le port 80 ? ---------------------------------------
+- name: Vérifier qu'HAProxy écoute sur le port 80
+  block:
+    - name: Attendre l'ouverture du port 80
+      ansible.builtin.wait_for:
+        port: 80
+        timeout: 15
+  rescue:
+    # Le service tournait sans écouter (ex : configuration d'origine du paquet, sans frontend)
+    # et le rechargement n'a pas suffi : redémarrage franc, une seule fois.
+    - name: Redémarrer HAProxy
+      ansible.builtin.service:
+        name: haproxy
+        state: restarted
+
+    - name: Attendre l'ouverture du port 80 après redémarrage
+      ansible.builtin.wait_for:
+        port: 80
+        timeout: 15
+
+# --- 4. Contrôle : la plateforme répond-elle de bout en bout ? -------------------------------
+# HAProxy -> nginx -> php-fpm : 200 (site installé) ou 302 (assistant d'installation de WordPress).
+# 503 = aucun nœud en service : ils entrent dans le round-robin dès que leur /readyz répond 200.
+- name: Vérifier qu'au moins un nœud WordPress répond derrière HAProxy
+  ansible.builtin.uri:
+    url: http://127.0.0.1/
+    follow_redirects: none
+    status_code: [200, 301, 302]
+  register: haproxy_probe
+  until: haproxy_probe is succeeded
+  retries: 15
+  delay: 2
+  changed_when: false
+  check_mode: false
+
+# Informatif : lu sur la page d'état locale, si elle est activée (haproxy_stats_cidrs non vide)
+- name: Lire l'état des nœuds sur la page d'état locale
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:8404/stats;csv"
+    return_content: true
+  register: haproxy_stats
+  when: haproxy_stats_cidrs | length > 0
+  changed_when: false
+  check_mode: false
+
+- name: Afficher l'état des nœuds WordPress
+  ansible.builtin.debug:
+    msg: "{{ item.split(',')[1] }} : {{ item.split(',')[17] }}"
+  loop: >-
+    {{ haproxy_stats.content.splitlines()
+       | select('match', '^wordpress_back,')
+       | reject('match', '^wordpress_back,(BACKEND|FRONTEND),')
+       | list }}
+  loop_control:
+    label: "{{ item.split(',')[1] }}"
+  when: haproxy_stats_cidrs | length > 0

@@ -1,0 +1,214 @@
+---
+# Rôle wordpress : nginx + php-fpm + WordPress, branché sur la base partagée (sti-wp01, sti-wp02).
+# Rejouable : WordPress n'est téléchargé qu'une fois et wp-content n'est jamais écrasé.
+
+- name: Contrôler les paramètres de connexion à la base
+  ansible.builtin.assert:
+    that:
+      - wp_db_name is defined
+      - wp_db_user is defined
+      - wp_db_password is defined
+      - wp_db_name is match('^[A-Za-z0-9_]{1,64}$')
+      - wp_db_user is match('^[A-Za-z0-9_]{1,32}$')
+      - wp_db_password is match('^[A-Za-z0-9._-]{12,}$')
+    quiet: true
+    fail_msg: >-
+      Paramètres de la base absents ou invalides : ils sont insérés dans wp-config.php, donc
+      limités à A-Z a-z 0-9 . _ - (mot de passe : 12 caractères minimum).
+      Lancer « terraform apply » : il écrit group_vars/all/.
+
+# --- 1. Paquets et php-fpm -------------------------------------------------------------
+- name: Installer nginx, php-fpm et les extensions PHP de WordPress
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - php-fpm
+      - php-cli
+      - php-mysql
+      - php-curl
+      - php-gd
+      - php-intl
+      - php-mbstring
+      - php-xml
+      - php-zip
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Le service et le socket php-fpm dépendent de la version de PHP installée
+# (déduite du binaire réellement présent : php-fpm8.2, php-fpm8.4...)
+- name: Repérer le binaire php-fpm installé
+  ansible.builtin.find:
+    paths: /usr/sbin
+    patterns: "php-fpm[0-9]*"
+  register: wordpress_php_fpm
+
+- name: Retenir la version de PHP
+  ansible.builtin.set_fact:
+    wordpress_php_version: >-
+      {{ wordpress_php_fpm.files | map(attribute='path') | sort | last
+         | basename | regex_replace('^php-fpm', '') }}
+  when: wordpress_php_fpm.matched > 0
+
+- name: Vérifier que php-fpm est présent
+  ansible.builtin.assert:
+    that: wordpress_php_version is defined
+    quiet: true
+    fail_msg: php-fpm introuvable dans /usr/sbin
+
+- name: Activer et démarrer php-fpm
+  ansible.builtin.service:
+    name: "php{{ wordpress_php_version }}-fpm"
+    state: started
+    enabled: true
+
+# --- 2. WordPress (téléchargé une seule fois, intégrité vérifiée en SHA1) ----------------
+- name: Créer le dossier du site
+  ansible.builtin.file:
+    path: "{{ wordpress_webroot }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+
+- name: Chercher une installation existante de WordPress
+  ansible.builtin.stat:
+    path: "{{ wordpress_webroot }}/wp-includes/version.php"
+  register: wordpress_installed
+
+- name: Télécharger et extraire WordPress
+  when: not wordpress_installed.stat.exists
+  block:
+    - name: Créer un dossier temporaire
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: wordpress.
+      register: wordpress_tmp
+
+    - name: Télécharger l'archive (empreinte SHA1 publiée par wordpress.org)
+      ansible.builtin.get_url:
+        url: "{{ wordpress_archive_url }}"
+        dest: "{{ wordpress_tmp.path }}/wordpress.tar.gz"
+        checksum: "sha1:{{ wordpress_archive_url }}.sha1"
+        mode: "0600"
+      register: wordpress_download
+      until: wordpress_download is succeeded
+      retries: 5
+      delay: 5
+
+    - name: Extraire WordPress dans le dossier du site
+      ansible.builtin.unarchive:
+        src: "{{ wordpress_tmp.path }}/wordpress.tar.gz"
+        dest: "{{ wordpress_webroot }}"
+        remote_src: true
+        extra_opts: [--strip-components=1]
+        owner: www-data
+        group: www-data
+
+  always:
+    - name: Supprimer le dossier temporaire
+      ansible.builtin.file:
+        path: "{{ wordpress_tmp.path }}"
+        state: absent
+      when: wordpress_tmp.path is defined
+
+# --- 3. wp-config.php (contient le mot de passe de la base) ------------------------------
+# Le fichier est contrôlé par « php -l » avant d'être installé ; diff désactivé : le mot
+# de passe n'apparaît pas dans la sortie de --diff.
+- name: Installer wp-config.php
+  ansible.builtin.template:
+    src: wp-config.php.j2
+    dest: "{{ wordpress_webroot }}/wp-config.php"
+    owner: root
+    group: www-data
+    mode: "0640"
+    validate: /usr/bin/php -l %s
+  diff: false
+
+# Sonde de disponibilité pour HAProxy (/readyz) : hors du dossier WordPress, jamais écrasée
+# par une mise à jour de WordPress, lisible mais non modifiable par www-data.
+- name: Créer le dossier de la sonde
+  ansible.builtin.file:
+    path: /var/www/healthz
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Installer la sonde readyz.php
+  ansible.builtin.template:
+    src: readyz.php.j2
+    dest: /var/www/healthz/readyz.php
+    owner: root
+    group: root
+    mode: "0644"
+
+# --- 4. nginx ------------------------------------------------------------------------------
+- name: Installer le site nginx
+  ansible.builtin.template:
+    src: nginx-wordpress.conf.j2
+    dest: /etc/nginx/sites-available/wordpress
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recharger nginx
+
+- name: Activer le site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/wordpress
+    dest: /etc/nginx/sites-enabled/wordpress
+    state: link
+  notify: Recharger nginx
+
+- name: Retirer le site par défaut de nginx
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Recharger nginx
+
+- name: Contrôler la configuration de nginx
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  check_mode: false
+
+- name: Activer et démarrer nginx
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+# Le rechargement éventuel a lieu ici, avant les contrôles
+- name: Appliquer la configuration
+  ansible.builtin.meta: flush_handlers
+
+# --- 5. Contrôles : nginx répond-il, la base est-elle joignable ? --------------------------
+- name: Vérifier que nginx répond (/healthz)
+  ansible.builtin.uri:
+    url: http://127.0.0.1/healthz
+    status_code: 200
+  register: wordpress_healthz
+  until: wordpress_healthz is succeeded
+  retries: 15
+  delay: 1
+  changed_when: false
+  check_mode: false
+
+# /readyz passe à 200 dès que la base MariaDB accepte le compte WordPress. Le play database
+# s'exécute avant celui-ci dans site.yml ; 503 = base injoignable (voir « content »).
+- name: Vérifier que la base partagée est joignable (/readyz)
+  ansible.builtin.uri:
+    url: http://127.0.0.1/readyz
+    status_code: "{{ wordpress_readyz_status }}"
+    return_content: true
+  register: wordpress_readyz
+  until: wordpress_readyz is succeeded
+  retries: 10
+  delay: 2
+  changed_when: false
+  check_mode: false
+
+# --- 6. Reliquat de l'ancien provisionnement par cloud-init --------------------------------
+- name: Supprimer l'ancien dossier de préparation (wp-config.php y était copié)
+  ansible.builtin.file:
+    path: /opt/wp-provision
+    state: absent

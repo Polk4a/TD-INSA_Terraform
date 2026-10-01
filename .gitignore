@@ -1,10 +1,9 @@
-*.tfvars
-*.tfvars.json
-
-**/.terraform/*
+.terraform/
 *.tfstate
 *.tfstate.*
 crash.log
-crash.*.log
-*.tfplan
+terraform.tfvars
+*.auto.tfvars
+ansible/inventory.ini
+ansible/group_vars/
 *.hcl

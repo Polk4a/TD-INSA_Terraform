@@ -1,0 +1,129 @@
+---
+# Rôle database : MariaDB partagée par les nœuds WordPress (sti-db01).
+# Rejouable : une seconde exécution ne change rien (mot de passe resynchronisé,
+# comptes non autorisés supprimés).
+
+- name: Contrôler les paramètres de la base
+  ansible.builtin.assert:
+    that:
+      - wp_db_name is defined
+      - wp_db_user is defined
+      - wp_db_password is defined
+      - wp_db_password is match('^[A-Za-z0-9._-]{12,}$')
+    quiet: true
+    fail_msg: >-
+      wp_db_name, wp_db_user ou wp_db_password est absent, ou le mot de passe est invalide
+      (12 caractères minimum, A-Z a-z 0-9 . _ -). Lancer « terraform apply » : il écrit
+      group_vars/all/.
+
+# --- 1. Installation -----------------------------------------------------------
+- name: Installer MariaDB (et PyMySQL, qu'utilisent les modules community.mysql)
+  ansible.builtin.apt:
+    name:
+      - mariadb-server
+      - mariadb-client
+      - python3-pymysql
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# --- 2. Configuration : écoute réseau, pas de résolution DNS inverse -------------
+- name: Déposer la configuration de MariaDB
+  ansible.builtin.copy:
+    src: mariadb-sti.cnf
+    dest: /etc/mysql/mariadb.conf.d/99-sti.cnf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Redémarrer MariaDB
+
+- name: Activer et démarrer MariaDB
+  ansible.builtin.service:
+    name: mariadb
+    state: started
+    enabled: true
+
+# Le redémarrage éventuel a lieu ici, avant de créer les comptes
+- name: Appliquer la configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Attendre que le serveur réponde (root local, authentification par socket Unix)
+  community.mysql.mysql_query:
+    login_unix_socket: "{{ database_socket }}"
+    query: SELECT 1
+  register: database_ping
+  until: database_ping is succeeded
+  retries: 30
+  delay: 1
+  changed_when: false
+  check_mode: false
+
+# --- 3. Base et compte WordPress, limités aux réseaux autorisés ---------------------
+# Le module envoie le mot de passe à MariaDB sans le mettre dans une ligne de commande.
+- name: Supprimer la base de démonstration « test »
+  community.mysql.mysql_db:
+    login_unix_socket: "{{ database_socket }}"
+    name: test
+    state: absent
+
+- name: Supprimer les comptes anonymes
+  community.mysql.mysql_user:
+    login_unix_socket: "{{ database_socket }}"
+    name: ""
+    host_all: true
+    state: absent
+
+- name: Créer la base de WordPress
+  community.mysql.mysql_db:
+    login_unix_socket: "{{ database_socket }}"
+    name: "{{ wp_db_name }}"
+    encoding: utf8mb4
+    collation: utf8mb4_unicode_ci
+    state: present
+
+- name: Créer le compte de WordPress pour chaque réseau autorisé
+  community.mysql.mysql_user:
+    login_unix_socket: "{{ database_socket }}"
+    name: "{{ wp_db_user }}"
+    host: "{{ item }}"
+    password: "{{ wp_db_password }}"
+    update_password: always
+    priv: "{{ wp_db_name }}.*:ALL"
+    state: present
+  loop: "{{ database_allowed_hosts }}"
+
+# --- 4. Convergence : retirer les accès qui ne sont plus autorisés --------------------
+- name: Lister les sources actuelles du compte WordPress
+  community.mysql.mysql_query:
+    login_unix_socket: "{{ database_socket }}"
+    query: SELECT Host AS host FROM mysql.user WHERE User = %s
+    positional_args:
+      - "{{ wp_db_user }}"
+  register: database_sources
+  changed_when: false
+  check_mode: false
+
+- name: Supprimer le compte des sources non autorisées
+  community.mysql.mysql_user:
+    login_unix_socket: "{{ database_socket }}"
+    name: "{{ wp_db_user }}"
+    host: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ database_sources.query_result[0] | map(attribute='host')
+       | difference(database_allowed_hosts) }}
+
+# --- 5. Contrôle : MariaDB écoute-t-elle sur le réseau (pas seulement en local) ? -------
+# Une écoute limitée à 127.0.0.1 est la première cause de « Error establishing a database
+# connection » côté WordPress : autant échouer ici qu'à l'ouverture du site.
+- name: Vérifier que MariaDB écoute sur l'adresse de la VM
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: 3306
+    timeout: 15
+
+# --- 6. Reliquat de l'ancien provisionnement par cloud-init ----------------------------
+- name: Supprimer l'ancien dossier de préparation (db.env contenait le mot de passe)
+  ansible.builtin.file:
+    path: /opt/db-provision
+    state: absent

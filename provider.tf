@@ -12,6 +12,11 @@ terraform {
       source  = "browningluke/opnsense"
       version = "~> 0.26.0"
     }
+    # écrit l'inventaire et les variables Ansible sur le poste (local_file)
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
   }
 }
 

@@ -1,4 +1,7 @@
 #cloud-config
+# Préparation de base, identique pour tous les rôles : nom, utilisateur, clé SSH et paquets
+# dont Ansible a besoin. Les logiciels (nginx, MariaDB, HAProxy...) sont installés ensuite
+# par Ansible : voir ansible/site.yml.
 hostname: ${hostname}
 manage_etc_hosts: true
 
@@ -16,32 +19,9 @@ package_upgrade: true
 packages:
   - vim
   - curl
-  - nginx
-  - php-fpm
-  - php-cli
-  - php-mysql
-  - php-curl
-  - php-gd
-  - php-intl
-  - php-mbstring
-  - php-xml
-  - php-zip
-
-write_files:
-  - path: /opt/wp-provision/wp-bootstrap.sh
-    permissions: '0700'
-    content: |
-      ${bootstrap_sh}
-  - path: /opt/wp-provision/nginx-wordpress.conf
-    permissions: '0644'
-    content: |
-      ${nginx_conf}
-  - path: /opt/wp-provision/wp-config.php
-    permissions: '0600'
-    content: |
-      ${wp_config_php}
+  - python3
+  - python3-apt
 
 runcmd:
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
-  - [ /opt/wp-provision/wp-bootstrap.sh, "${wp_version}" ]

@@ -1,0 +1,11 @@
+---
+# Variables communes à la plateforme, fournies par Terraform dans group_vars/all/ et partagées
+# avec le rôle wordpress : wp_db_name, wp_db_user (terraform.yml) et wp_db_password (secrets.yml).
+
+# Sources autorisées pour le compte WordPress, au format adresse/masque de MariaDB
+# (le « VLAN web » du cours). Fournies par Terraform à partir de db_allowed_cidrs.
+database_allowed_hosts:
+  - 10.0.0.0/255.255.255.0
+
+# Socket Unix de MariaDB : root s'y authentifie sans mot de passe (compte unix_socket de Debian)
+database_socket: /run/mysqld/mysqld.sock

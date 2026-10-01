@@ -1,0 +1,25 @@
+---
+# --- WordPress ---------------------------------------------------------------------
+# Version identique sur tous les nœuds ; fournie par Terraform (variable wp_version).
+wordpress_version: "7.1.2"
+wordpress_download_base: https://wordpress.org
+wordpress_archive_url: "{{ wordpress_download_base }}/wordpress-{{ wordpress_version }}.tar.gz"
+wordpress_webroot: /var/www/wordpress
+
+# --- Base de données partagée --------------------------------------------------------
+# Variables communes à la plateforme, fournies par Terraform dans group_vars/all/ et partagées
+# avec le rôle database : wp_db_name, wp_db_user (terraform.yml) et wp_db_password (secrets.yml).
+# Hôte MariaDB : écrit par Terraform ; à défaut, l'IP de la VM du groupe « database » de l'inventaire.
+wordpress_db_host: "{{ hostvars[groups['database'] | first].ansible_host }}"
+# Réponse attendue de /readyz (la base accepte le compte WordPress) : 200 dès que la plateforme
+# a une VM « database » ; avant (étapes intermédiaires, base pas encore déployée), 503 est admis.
+wordpress_readyz_status: >-
+  {{ [200] if groups['database'] | default([]) | length > 0 else [200, 503] }}
+
+# --- Derrière HAProxy -------------------------------------------------------------------
+# IP des HAProxy de l'inventaire (groupe « haproxy ») : seuls appelants dont nginx croit
+# X-Forwarded-For, et seuls à qui il répond (403 pour les autres) si wordpress_only_from_proxy.
+wordpress_proxy_ips: >-
+  {{ groups['haproxy'] | default([]) | map('extract', hostvars, 'ansible_host')
+     | list }}
+wordpress_only_from_proxy: true

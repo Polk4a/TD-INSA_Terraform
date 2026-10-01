@@ -1,11 +1,11 @@
 variable "ci_user" {
-  description = "Utilisateur créé via cloud-init sur la VM"
+  description = "Utilisateur créé via cloud-init sur les VM ; c'est aussi celui qu'Ansible utilise pour s'y connecter"
   type        = string
   default     = "admin"
 }
 
 variable "ssh_public_key_path" {
-  description = "Chemin local vers la clé publique SSH à injecter dans la VM"
+  description = "Chemin local vers la clé publique SSH à injecter dans les VM ; la clé privée correspondante (même chemin sans .pub) est celle d'Ansible"
   type        = string
   default     = "~/.ssh/id_ed25519.pub"
 }
@@ -44,7 +44,7 @@ variable "opnsense_api_secret" {
 }
 
 variable "vms" {
-  description = "VMs de la plateforme, clonées depuis le même template : nom => rôle, vmid et IP fixe (réservation Kea sur OPNsense). Rôles : wordpress, database."
+  description = "VMs de la plateforme, clonées depuis le même template : nom => rôle, vmid et IP fixe (réservation Kea sur OPNsense). Rôles : wordpress, database, haproxy."
   type = map(object({
     role       = string
     vmid       = number
@@ -69,6 +69,11 @@ variable "vms" {
       vmid = 122
       ip   = "10.0.0.170"
     }
+    "sti-lb01" = {
+      role = "haproxy"
+      vmid = 123
+      ip   = "10.0.0.180"
+    }
   }
 
   validation {
@@ -77,8 +82,8 @@ variable "vms" {
   }
 
   validation {
-    condition     = alltrue([for vm in values(var.vms) : contains(["wordpress", "database"], vm.role)])
-    error_message = "role doit valoir « wordpress » ou « database »."
+    condition     = alltrue([for vm in values(var.vms) : contains(["wordpress", "database", "haproxy"], vm.role)])
+    error_message = "role doit valoir « wordpress », « database » ou « haproxy »."
   }
 
   validation {
@@ -95,6 +100,16 @@ variable "vms" {
     condition     = length([for vm in values(var.vms) : vm if vm.role == "database"]) <= 1
     error_message = "Une seule VM au rôle « database » : la base MariaDB est partagée par tous les WordPress."
   }
+
+  validation {
+    condition     = length([for vm in values(var.vms) : vm if vm.role == "haproxy"]) <= 1
+    error_message = "Une seule VM au rôle « haproxy » : c'est le point d'entrée unique de la plateforme."
+  }
+
+  validation {
+    condition     = length([for vm in values(var.vms) : vm if vm.role == "haproxy"]) == 0 || length([for vm in values(var.vms) : vm if vm.role == "wordpress"]) > 0
+    error_message = "Une VM « haproxy » a besoin d'au moins une VM « wordpress » à répartir."
+  }
 }
 
 variable "wp_version" {
@@ -109,7 +124,7 @@ variable "wp_version" {
 }
 
 variable "wp_db_host" {
-  description = "Hôte MariaDB vu par WordPress (avec :port optionnel). Par défaut (null) : l'IP de la VM au rôle « database »."
+  description = "Hôte MariaDB vu par WordPress (avec :port optionnel), transmis à Ansible. Par défaut (null) : l'IP de la VM au rôle « database » (ou « sti-db01 » tant qu'elle n'existe pas)."
   type        = string
   default     = null
 
@@ -142,7 +157,7 @@ variable "wp_db_user" {
 }
 
 variable "wp_db_password" {
-  description = "Mot de passe MariaDB de WordPress, à mettre dans terraform.tfvars (hors Git). Utilisé des deux côtés (création du compte sur la base, wp-config.php sur les WordPress). Les clés/sels WordPress en sont dérivés : ils sont donc identiques sur tous les nœuds, indispensable derrière HAProxy en round-robin."
+  description = "Mot de passe MariaDB de WordPress, à mettre dans terraform.tfvars (hors Git). Transmis à Ansible dans ansible/group_vars/all/secrets.yml (fichier 0600, ignoré par git) et utilisé des deux côtés : création du compte sur la base, wp-config.php sur les WordPress. Les clés/sels WordPress en sont dérivés : ils sont donc identiques sur tous les nœuds, indispensable derrière HAProxy en round-robin."
   type        = string
   sensitive   = true
 
@@ -167,4 +182,32 @@ variable "db_firewall_interface" {
   description = "Interface OPNsense (ex : \"lan\") sur laquelle créer la règle du cours « MariaDB (TCP 3306) depuis le VLAN web ». Défaut null = aucune règle. Sans effet tant que les VM partagent le même sous-réseau (ce trafic ne traverse pas OPNsense) : utile si la base est placée dans un autre VLAN."
   type        = string
   default     = null
+}
+
+variable "wp_only_from_proxy" {
+  description = "Les nœuds WordPress ne répondent qu'à HAProxy (403 pour tout autre appelant, sauf eux-mêmes), comme le demande le cours. Mettre false pour joindre un nœud directement (dépannage). Sans effet s'il n'y a aucune VM « haproxy »."
+  type        = bool
+  default     = true
+}
+
+variable "lb_stats_cidrs" {
+  description = "Réseaux autorisés à consulter la page d'état d'HAProxy (http://IP-HAProxy:8404/stats, lecture seule). Liste vide = page d'état désactivée."
+  type        = list(string)
+  default     = ["10.0.0.0/24"]
+
+  validation {
+    condition     = alltrue([for c in var.lb_stats_cidrs : can(cidrhost(c, 0))])
+    error_message = "lb_stats_cidrs : réseaux CIDR IPv4 (ex : 10.0.0.0/24), ou liste vide."
+  }
+}
+
+variable "ansible_jump_host" {
+  description = "Hôte de rebond SSH (ex : root@192.168.122.220) par lequel Ansible joint les VM, si elles ne sont pas routées depuis ce poste. Défaut null = connexion directe."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.ansible_jump_host == null || can(regex("^([A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+(:[0-9]{1,5})?$", var.ansible_jump_host))
+    error_message = "ansible_jump_host : [utilisateur@]hôte[:port] (ex : root@192.168.122.220)."
+  }
 }

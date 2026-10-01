@@ -1,7 +1,7 @@
-# sti-db01 : MariaDB partagée par les nœuds WordPress (déposé par db-bootstrap.sh)
+# sti-db01 : MariaDB partagée par les nœuds WordPress (géré par Ansible, rôle database)
 [mysqld]
 # Écoute sur le réseau (Debian n'écoute par défaut que sur 127.0.0.1).
-# L'accès est limité aux réseaux autorisés au niveau des comptes (db-bootstrap.sh).
+# L'accès est limité aux réseaux autorisés au niveau des comptes (voir tasks/main.yml).
 bind-address = 0.0.0.0
 
 # Les comptes sont définis par adresse IP : inutile (et lent) de résoudre les noms.

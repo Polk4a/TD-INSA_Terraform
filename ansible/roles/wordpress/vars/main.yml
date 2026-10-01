@@ -1,0 +1,11 @@
+---
+# Clés et sels de wp-config.php : dérivés du mot de passe de la base, donc identiques sur tous les nœuds
+wordpress_salt_names:
+  - AUTH_KEY
+  - SECURE_AUTH_KEY
+  - LOGGED_IN_KEY
+  - NONCE_KEY
+  - AUTH_SALT
+  - SECURE_AUTH_SALT
+  - LOGGED_IN_SALT
+  - NONCE_SALT

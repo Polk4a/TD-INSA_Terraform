@@ -1,0 +1,11 @@
+---
+# Rechargement à chaud (expose-fd) : les connexions en cours ne sont pas coupées
+- name: Recharger HAProxy
+  ansible.builtin.service:
+    name: haproxy
+    state: reloaded
+
+- name: Redémarrer rsyslog
+  ansible.builtin.service:
+    name: rsyslog
+    state: restarted

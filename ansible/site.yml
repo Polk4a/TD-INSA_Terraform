@@ -1,0 +1,35 @@
+---
+# Déploiement complet : « ansible-playbook site.yml » (depuis ce dossier, après terraform apply).
+# L'inventaire et les variables ont été écrits par Terraform. Ordre : base de données, nœuds
+# WordPress, puis HAProxy : chaque étape trouve prêt ce dont elle dépend (la sonde /readyz
+# d'un nœud WordPress a besoin de la base ; HAProxy a besoin des nœuds).
+
+- name: Attendre que les VM soient prêtes
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Attendre la connexion SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    # cloud-init installe les paquets de base : Ansible ne doit pas se battre avec apt
+    - name: Attendre la fin de cloud-init
+      ansible.builtin.command: cloud-init status --wait
+      register: cloud_init
+      changed_when: false
+      failed_when: cloud_init.rc == 1
+
+- name: Configurer la base de données
+  hosts: database
+  become: true
+  roles: [database]
+
+- name: Configurer les serveurs WordPress
+  hosts: wordpress
+  become: true
+  roles: [wordpress]
+
+- name: Configurer le load balancer
+  hosts: haproxy
+  become: true
+  roles: [haproxy]

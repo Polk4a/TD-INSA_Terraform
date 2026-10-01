@@ -1,0 +1,5 @@
+---
+# Réseaux autorisés à consulter la page d'état en lecture seule (http://IP-HAProxy:8404/stats),
+# en plus de 127.0.0.1. Liste vide = page d'état désactivée. Fournie par Terraform.
+haproxy_stats_cidrs:
+  - 10.0.0.0/24

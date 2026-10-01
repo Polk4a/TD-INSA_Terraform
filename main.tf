@@ -1,51 +1,39 @@
 locals {
   ssh_public_key = trimspace(file(pathexpand(var.ssh_public_key_path)))
 
+  ssh_private_key_path = trimsuffix(var.ssh_public_key_path, ".pub")
+
   database_ips = [for vm in values(var.vms) : vm.ip if vm.role == "database"]
+  haproxy_ips  = [for vm in values(var.vms) : vm.ip if vm.role == "haproxy"]
+  lb_ip        = one(local.haproxy_ips)
 
   db_host = coalesce(var.wp_db_host, one(local.database_ips), "sti-db01")
 
-  db_allowed_hosts = [for c in var.db_allowed_cidrs : "${cidrhost(c, 0)}/${cidrnetmask(c)}"]
-
-  wp_salt_names = [
-    "AUTH_KEY", "SECURE_AUTH_KEY", "LOGGED_IN_KEY", "NONCE_KEY",
-    "AUTH_SALT", "SECURE_AUTH_SALT", "LOGGED_IN_SALT", "NONCE_SALT",
+  ansible_groups = [
+    for role in ["database", "wordpress", "haproxy"] : {
+      role  = role
+      hosts = { for name, vm in var.vms : name => vm.ip if vm.role == role }
+    }
   ]
 
-  wp_config = templatefile("${path.module}/wp-config.php.tpl", {
-    db_name     = var.wp_db_name
-    db_user     = var.wp_db_user
-    db_password = var.wp_db_password
-    db_host     = local.db_host
-    salts = join("\n", [
-      for k in local.wp_salt_names : "define( '${k}', '${sha512("${var.wp_db_password}:${k}")}' );"
-    ])
-  })
+  db_allowed_hosts = [for c in var.db_allowed_cidrs : "${cidrhost(c, 0)}/${cidrnetmask(c)}"]
 
-  db_env = templatefile("${path.module}/db.env.tpl", {
-    db_name       = var.wp_db_name
-    db_user       = var.wp_db_user
-    db_password   = var.wp_db_password
-    allowed_hosts = join(" ", local.db_allowed_hosts)
-  })
-
-  tpl_vars = {
-    ci_user         = var.ci_user
-    ssh_public_key  = local.ssh_public_key
-    wp_version      = var.wp_version
-    bootstrap_sh    = indent(6, file("${path.module}/wp-bootstrap.sh"))
-    nginx_conf      = indent(6, file("${path.module}/nginx-wordpress.conf"))
-    wp_config_php   = indent(6, local.wp_config)
-    db_bootstrap_sh = indent(6, file("${path.module}/db-bootstrap.sh"))
-    db_conf         = indent(6, file("${path.module}/mariadb-sti.cnf"))
-    db_env          = indent(6, local.db_env)
+  ansible_vars = {
+    wp_db_name                = var.wp_db_name
+    wp_db_user                = var.wp_db_user
+    wordpress_version         = var.wp_version
+    wordpress_db_host         = local.db_host
+    wordpress_only_from_proxy = var.wp_only_from_proxy
+    database_allowed_hosts    = local.db_allowed_hosts
+    haproxy_stats_cidrs       = var.lb_stats_cidrs
   }
 
   user_data = {
-    for name, vm in var.vms : name => templatefile(
-      "${path.module}/user-data-${vm.role}.yml.tpl",
-      merge(local.tpl_vars, { hostname = name })
-    )
+    for name, vm in var.vms : name => templatefile("${path.module}/user-data.yml.tpl", {
+      hostname       = name
+      ci_user        = var.ci_user
+      ssh_public_key = local.ssh_public_key
+    })
   }
 
   snippet_file = { for name in keys(var.vms) : name => "${name}-user-data.yml" }
@@ -125,13 +113,6 @@ resource "terraform_data" "upload_snippet" {
     content     = local.user_data[each.key]
     destination = "/var/lib/vz/snippets/${local.snippet_file[each.key]}"
   }
-
-  # Le snippet contient le mot de passe de la base : lisible par root uniquement
-  provisioner "remote-exec" {
-    inline = [
-      "chmod 600 /var/lib/vz/snippets/${local.snippet_file[each.key]}"
-    ]
-  }
 }
 
 resource "macaddress" "vm" {
@@ -201,6 +182,45 @@ resource "proxmox_vm_qemu" "vm" {
   }
 }
 
+resource "local_file" "ansible_inventory" {
+  filename             = "${path.module}/ansible/inventory.ini"
+  file_permission      = "0644"
+  directory_permission = "0755"
+
+  content = templatefile("${path.module}/inventory.tpl", {
+    groups      = local.ansible_groups
+    ci_user     = var.ci_user
+    private_key = local.ssh_private_key_path
+    jump_host   = var.ansible_jump_host
+  })
+
+  depends_on = [proxmox_vm_qemu.vm]
+}
+
+resource "local_file" "ansible_vars" {
+  filename             = "${path.module}/ansible/group_vars/all/terraform.yml"
+  file_permission      = "0644"
+  directory_permission = "0755"
+
+  content = join("\n", [
+    "---",
+    "# GÉNÉRÉ par Terraform (main.tf) : ne pas éditer, réécrit à chaque terraform apply.",
+    yamlencode(local.ansible_vars),
+  ])
+}
+
+resource "local_sensitive_file" "ansible_secrets" {
+  filename             = "${path.module}/ansible/group_vars/all/secrets.yml"
+  file_permission      = "0600"
+  directory_permission = "0755"
+
+  content = join("\n", [
+    "---",
+    "# GÉNÉRÉ par Terraform (main.tf) : secret, ne jamais committer.",
+    yamlencode({ wp_db_password = var.wp_db_password }),
+  ])
+}
+
 resource "opnsense_firewall_filter" "db_from_web_only" {
   for_each = var.db_firewall_interface == null || length(local.database_ips) == 0 ? toset([]) : toset(var.db_allowed_cidrs)
 
@@ -221,7 +241,7 @@ resource "opnsense_firewall_filter" "db_from_web_only" {
 }
 
 output "vms" {
-  description = "Rôle, IP, MAC et vmid de chaque VM (à réutiliser pour le backend HAProxy)"
+  description = "Rôle, IP, MAC et vmid de chaque VM de la plateforme"
   value = {
     for name, vm in var.vms : name => {
       role = vm.role
@@ -230,6 +250,16 @@ output "vms" {
       vmid = vm.vmid
     }
   }
+}
+
+output "lb_url" {
+  description = "Point d'entrée unique du site (HAProxy) ; null sans VM haproxy"
+  value       = local.lb_ip == null ? null : "http://${local.lb_ip}/"
+}
+
+output "lb_stats_url" {
+  description = "Page d'état d'HAProxy (nœuds UP/DOWN, répartition) ; null si désactivée"
+  value       = local.lb_ip == null || length(var.lb_stats_cidrs) == 0 ? null : "http://${local.lb_ip}:8404/stats"
 }
 
 output "wp_db_host" {

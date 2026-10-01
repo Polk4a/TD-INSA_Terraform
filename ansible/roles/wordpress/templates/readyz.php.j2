@@ -1,0 +1,52 @@
+<?php
+/**
+ * /readyz : sonde de disponibilité d'un nœud WordPress, interrogée par HAProxy
+ * (backend wordpress_back : http-check GET /readyz).
+ *
+ *   200 "ok"  -> php-fpm fonctionne ET la base MariaDB partagée accepte le compte WordPress
+ *   503       -> le nœud est retiré du round-robin jusqu'à son rétablissement
+ *
+ * Volontairement indépendante de WordPress (pas de wp-load.php) : réponse rapide, et
+ * insensible aux plugins, aux thèmes et aux mises à jour. Les identifiants sont lus dans
+ * wp-config.php : une seule source de vérité avec le site.
+ * (/healthz, côté nginx seul, reste la sonde de vivacité utilisée par le rôle wordpress.)
+ */
+header( 'Content-Type: text/plain; charset=utf-8' );
+header( 'Cache-Control: no-store' );
+
+function not_ready( $why ) {
+	http_response_code( 503 );
+	echo "not ready: {$why}\n";
+	exit;
+}
+
+$config = @file_get_contents( '{{ wordpress_webroot }}/wp-config.php' );
+if ( false === $config ) {
+	not_ready( 'wp-config.php illisible' );
+}
+
+$db = array();
+foreach ( array( 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME' ) as $key ) {
+	if ( ! preg_match( "/define\(\s*'" . $key . "'\s*,\s*'([^']*)'\s*\)/", $config, $m ) ) {
+		not_ready( $key . ' absent de wp-config.php' );
+	}
+	$db[ $key ] = $m[1];
+}
+
+// DB_HOST peut être « hôte » ou « hôte:port »
+$parts = explode( ':', $db['DB_HOST'], 2 );
+$host  = $parts[0];
+$port  = isset( $parts[1] ) ? (int) $parts[1] : 3306;
+
+mysqli_report( MYSQLI_REPORT_OFF );
+$link = mysqli_init();
+mysqli_options( $link, MYSQLI_OPT_CONNECT_TIMEOUT, 2 );
+if ( ! @mysqli_real_connect( $link, $host, $db['DB_USER'], $db['DB_PASSWORD'], $db['DB_NAME'], $port ) ) {
+	not_ready( 'base injoignable (erreur ' . mysqli_connect_errno() . ')' );
+}
+if ( ! mysqli_query( $link, 'SELECT 1' ) ) {
+	not_ready( 'requête SQL refusée' );
+}
+mysqli_close( $link );
+
+echo "ok\n";
